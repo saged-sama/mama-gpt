@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.8.4",
+    "tokenizers>=0.22.2",
     "torch>=2.11.0",
 ]
