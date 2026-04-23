@@ -4,7 +4,7 @@ from tokenizers import Tokenizer, decoders
 import time
 
 MODEL_NAME = "mama-gpt"
-MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_123M_ds5B.pt"
+MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_best.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
 VOCAB_SIZE = 50_000
@@ -19,7 +19,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def load_model():
     print(f"Loading tokenizer from {TOKENIZER_PATH}...")
     tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
-    tokenizer.decoder = decoders.BPEDecoder()
+    tokenizer.decoder = decoders.ByteLevel()
     
     print(f"Initializing Mamma architecture...")
     model = Mamma(
@@ -37,7 +37,7 @@ def load_model():
     
     # If your checkpoint was the new 'dictionary' style, you'd use state_dict['model_state_dict']
     # But for your 5B token model, it's just the raw dict:
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict["model_state_dict"])
     
     model.to(DEVICE)
     model.eval() # Set to evaluation mode
