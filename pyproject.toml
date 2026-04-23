@@ -8,5 +8,7 @@ dependencies = [
     "datasets>=4.8.4",
     "tokenizers>=0.22.2",
     "torch>=2.11.0",
+    "torchao>=0.17.0",
     "torchtune>=0.6.1",
+    "torchvision>=0.26.0",
 ]

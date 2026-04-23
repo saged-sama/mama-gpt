@@ -9,9 +9,10 @@ develop-eggs/
 dist/
 downloads/
 output/
+logs/
 eggs/
 .eggs/
-lib/
+# lib/
 lib64/
 parts/
 sdist/
@@ -20,6 +21,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.env
 
 # uv specific
 uv.lock
