@@ -32,6 +32,16 @@ class Mamma(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
 
+        # Create a simple config object for compatibility with transformers/trl
+        class Config:
+            pass
+        self.config = Config()
+        self.config.vocab_size = vocab_size
+        self.config.hidden_size = dim
+        self.config.max_position_embeddings = context_length
+        self.config.num_hidden_layers = num_layers
+        self.config.num_attention_heads = num_heads
+
         self.embedding = nn.Embedding(vocab_size, dim)
 
         self.layers = nn.ModuleList([

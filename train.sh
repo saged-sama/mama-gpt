@@ -1,0 +1,1 @@
+PYTHONUNBUFFERED=1 PYTHONPATH=. uv run -- python -u src/train.py > logs/train_mamma.txt 2>&1

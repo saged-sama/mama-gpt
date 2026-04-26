@@ -4,14 +4,14 @@ from tokenizers import Tokenizer, decoders
 import time
 
 MODEL_NAME = "mama-gpt"
-MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_best.pt"
+MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_latest.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
 VOCAB_SIZE = 50_000
 D_MODEL = 768
 NUM_HEADS = 12
 NUM_LAYERS = 12
-D_FF = 2048
+D_FF = 3072
 CONTEXT_LENGTH = 1024
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

@@ -4,12 +4,15 @@ import torch
 from models.mamma import Mamma
 from torch.utils.data import DataLoader
 from torch.optim import AdamW, lr_scheduler
+from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import GradScaler, autocast
 import os
+import math
 
 VOCAB_SIZE = 50_000
 BATCH_SIZE = 16
 MAX_SAMPLES = 50_000
+MAX_TRAINING_STEPS=100_000
 MODEL_NAME = "mama-gpt"
 MODEL_PATH = f"output/{MODEL_NAME}"
 CONTEXT_LENGTH = 1024
@@ -19,13 +22,12 @@ MAX_NORM = 1.0
 ACCUMULATION_STEPS = 16
 LEARNING_RATE = 3e-4
 MINIMUM_LEARNING_RATE = 1e-6
-WARM_UP_STEPS=1000
-WARM_UP_FACTOR=2
+WARM_UP_STEPS=2000
 WEIGHT_DECAY = 0.1
 d_model = 768
 num_heads = 12
 num_layers = 12
-d_ff = 2048
+d_ff = 3072
 
 print(f"Training {MODEL_NAME} with\nvocab size = {VOCAB_SIZE}\nbatch size = {BATCH_SIZE}\nmax samples = {MAX_SAMPLES}\ncontext length = {CONTEXT_LENGTH}\nmodel dimension = {d_model}\nnumber of heads = {num_heads}\nnumber of layers = {num_layers}\nfeedforward dimension = {d_ff}\n\n")
 
@@ -37,7 +39,7 @@ ds = load_dataset(
 )
 print("Dataset loaded. ✅")
 
-def batch_iterator(batch_size=1000, max_samples=1_000_000):
+def batch_iterator(batch_size=1000, max_samples=10_000):
     batch = []
     count = 0
 
@@ -143,11 +145,41 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
 print(f"Model moved to {device} ✅:\n{torch.cuda.get_device_properties(device).name if device == 'cuda' else 'CPU'}\n")
 
-optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+def get_cosine_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps,
+    num_training_steps,
+    min_lr_ratio=0.1  # final LR = 10% of peak
+):
+    def lr_lambda(current_step):
+        # 🔥 Warmup phase
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+
+        # 🔥 Cosine decay phase
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        # scale to [min_lr_ratio, 1]
+        return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
+
+    return LambdaLR(optimizer, lr_lambda)
+
+optimizer = AdamW(
+    model.parameters(), 
+    lr=LEARNING_RATE, 
+    weight_decay=WEIGHT_DECAY,
+    betas=(0.9, 0.95),
+    eps=1e-5
+)
+
 lr_sched = lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer=optimizer,
     T_0=WARM_UP_STEPS,
-    T_mult=WARM_UP_FACTOR,
+    T_mult=2,
     eta_min=MINIMUM_LEARNING_RATE
 )
 scaler = GradScaler()
