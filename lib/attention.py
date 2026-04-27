@@ -1,7 +1,61 @@
 import torch.nn as nn
-from torch.nn.functional import scaled_dot_product_attention
 from torchtune.modules import RotaryPositionalEmbeddings
 import torch
+from lib.nn_blocks import softmax, Linear
+import math
+
+def scaled_dot_product_attention(q, k, v, is_causal=False):
+    dk = q.shape[-1]
+    
+    if dk != k.shape[-1]:
+        raise ValueError("Dimension mismatch between q and k")
+    
+    scores = q @ k.transpose(-2, -1)
+    
+    scores = scores / math.sqrt(dk)
+    
+    if is_causal:
+        L = scores.size(-1)
+        mask = torch.triu(
+            torch.ones(L, L, device=scores.device, dtype=torch.bool),
+            diagonal=1
+        )
+        scores = scores.masked_fill(mask, float('-inf'))
+        
+    attn = softmax(scores, dim=-1)
+    return attn @ v
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, dim, num_heads, context_length):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.context_length = context_length
+        
+        assert dim % num_heads == 0
+        
+        self.q = Linear(dim, dim, bias=False)
+        self.k = Linear(dim, dim, bias=False)
+        self.v = Linear(dim, dim, bias=False)
+        self.out_proj = Linear(dim, dim, bias=False)
+        
+    def forward(self, x, is_causal=False):
+        B, T, D = x.shape
+        
+        Q = self.q(x)
+        K = self.k(x)
+        V = self.v(x)
+
+        Q = Q.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+
+        out = scaled_dot_product_attention(Q, K, V, is_causal=is_causal)
+
+        out = out.transpose(1, 2).contiguous().reshape(B, T, D)
+
+        return self.out_proj(out)        
+
 
 class MultiHeadAttentionWithRope(nn.Module):
     def __init__(self, dim, num_heads, context_length):
@@ -12,8 +66,8 @@ class MultiHeadAttentionWithRope(nn.Module):
         
         assert dim % num_heads == 0
         
-        self.qkv = nn.Linear(dim, 3*dim, bias=False)
-        self.out_proj = nn.Linear(dim, dim, bias=False)
+        self.qkv = Linear(dim, 3*dim, bias=False)
+        self.out_proj = Linear(dim, dim, bias=False)
         
         self.rope = RotaryPositionalEmbeddings(
             dim=self.head_dim,
