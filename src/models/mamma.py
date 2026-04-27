@@ -62,7 +62,7 @@ class Mamma(nn.Module):
         return self.output(x)
     
     @torch.no_grad()
-    def generate(self, x, max_new_tokens=50, temperature=1.0, top_k=None, penalty=1.2):
+    def generate(self, x, max_new_tokens=50, temperature=1.0, top_k=None, penalty=1.2, pad_token_id=None):
         self.eval()
         
         for layer in self.layers:
@@ -75,8 +75,12 @@ class Mamma(nn.Module):
         for _ in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
             
-            for id in set(x[0].tolist()):
-                logits_last[0, id] /= penalty
+            for token_id in set(x[0].tolist()):
+                if pad_token_id is None or token_id != pad_token_id:
+                    logits_last[0, token_id] /= penalty
+
+            if pad_token_id is not None:
+                logits_last[:, pad_token_id] = -float("inf")
             
             if top_k is not None:
                 v, _ = torch.topk(logits_last, min(top_k, logits_last.size(-1)))
@@ -84,6 +88,9 @@ class Mamma(nn.Module):
                 
             probs = torch.softmax(logits_last, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
+
+            if pad_token_id is not None and torch.all(next_token == pad_token_id):
+                break
             
             generated_tokens.append(next_token)
             

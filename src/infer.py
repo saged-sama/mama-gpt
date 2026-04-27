@@ -4,7 +4,7 @@ from tokenizers import Tokenizer, decoders
 import time
 
 MODEL_NAME = "mama-gpt"
-MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_latest.pt"
+MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_latest_sft.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
 VOCAB_SIZE = 50_000
@@ -47,12 +47,21 @@ def chat():
     model, tokenizer = load_model()
     print("\n" + "="*50)
     print("Mamma-GPT is ready. Type 'exit' to quit.")
+    print("End your input with '#$%@'.")
     print("="*50 + "\n")
 
     while True:
-        prompt = input("User: ")
-        if prompt.lower() in ['exit', 'quit', "q"]:
-            break
+        lines = []
+        print("User: ")
+        while True:
+            line = input()
+            if not lines and line.lower() in ['exit', 'quit', "q"]:
+                return
+            if line == "#$%@":
+                break
+            lines.append(line)
+
+        prompt = "\n".join(lines)
         
         if not prompt.strip():
             continue
@@ -70,9 +79,10 @@ def chat():
         with torch.no_grad():
             output_tensor = model.generate(
                 x=x,
-                max_new_tokens=128,
-                temperature=0.7,
-                top_k=50
+                max_new_tokens=512,
+                temperature=1.0,
+                top_k=None,
+                pad_token_id=tokenizer.token_to_id("<EOS>")
             )
         
         # Decode and print
