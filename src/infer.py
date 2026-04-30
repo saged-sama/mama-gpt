@@ -1,17 +1,17 @@
 import torch
-from models.mamma import Mamma
+from src.models.mamma import Mamma
 from tokenizers import Tokenizer, decoders
 import time
 
-MODEL_NAME = "mama-gpt"
+MODEL_NAME = "mama-gpt-small"
 MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_mama-gpt_latest_sft.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
-VOCAB_SIZE = 50_000
-D_MODEL = 768
-NUM_HEADS = 12
-NUM_LAYERS = 12
-D_FF = 3072
+VOCAB_SIZE = 32_000
+D_MODEL = 64
+NUM_HEADS = 8
+NUM_LAYERS = 8
+D_FF = 256
 CONTEXT_LENGTH = 1024
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -37,7 +37,7 @@ def load_model():
     
     # If your checkpoint was the new 'dictionary' style, you'd use state_dict['model_state_dict']
     # But for your 5B token model, it's just the raw dict:
-    model.load_state_dict(state_dict["model_state_dict"])
+    model.load_state_dict(state_dict)
     
     model.to(DEVICE)
     model.eval() # Set to evaluation mode

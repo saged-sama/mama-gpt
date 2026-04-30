@@ -1,60 +1,61 @@
 import torch.nn as nn
 from torchtune.modules import RotaryPositionalEmbeddings
 import torch
-from lib.nn_blocks import softmax, Linear
-import math
+# from lib.nn_blocks import softmax, Linear
+from torch.nn import Linear
+from torch.nn.functional import scaled_dot_product_attention
 
-def scaled_dot_product_attention(q, k, v, is_causal=False):
-    dk = q.shape[-1]
+# def scaled_dot_product_attention(q, k, v, is_causal=False):
+#     dk = q.shape[-1]
     
-    if dk != k.shape[-1]:
-        raise ValueError("Dimension mismatch between q and k")
+#     if dk != k.shape[-1]:
+#         raise ValueError("Dimension mismatch between q and k")
     
-    scores = q @ k.transpose(-2, -1)
+#     scores = q @ k.transpose(-2, -1)
     
-    scores = scores / math.sqrt(dk)
+#     scores = scores / math.sqrt(dk)
     
-    if is_causal:
-        L = scores.size(-1)
-        mask = torch.triu(
-            torch.ones(L, L, device=scores.device, dtype=torch.bool),
-            diagonal=1
-        )
-        scores = scores.masked_fill(mask, float('-inf'))
+#     if is_causal:
+#         L = scores.size(-1)
+#         mask = torch.triu(
+#             torch.ones(L, L, device=scores.device, dtype=torch.bool),
+#             diagonal=1
+#         )
+#         scores = scores.masked_fill(mask, float('-inf'))
         
-    attn = softmax(scores, dim=-1)
-    return attn @ v
+#     attn = softmax(scores, dim=-1)
+#     return attn @ v
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, num_heads, context_length):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.context_length = context_length
+# class MultiHeadAttention(nn.Module):
+#     def __init__(self, dim, num_heads, context_length):
+#         super().__init__()
+#         self.num_heads = num_heads
+#         self.head_dim = dim // num_heads
+#         self.context_length = context_length
         
-        assert dim % num_heads == 0
+#         assert dim % num_heads == 0
         
-        self.q = Linear(dim, dim, bias=False)
-        self.k = Linear(dim, dim, bias=False)
-        self.v = Linear(dim, dim, bias=False)
-        self.out_proj = Linear(dim, dim, bias=False)
+#         self.q = Linear(dim, dim, bias=False)
+#         self.k = Linear(dim, dim, bias=False)
+#         self.v = Linear(dim, dim, bias=False)
+#         self.out_proj = Linear(dim, dim, bias=False)
         
-    def forward(self, x, is_causal=False):
-        B, T, D = x.shape
+#     def forward(self, x, is_causal=False):
+#         B, T, D = x.shape
         
-        Q = self.q(x)
-        K = self.k(x)
-        V = self.v(x)
+#         Q = self.q(x)
+#         K = self.k(x)
+#         V = self.v(x)
 
-        Q = Q.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        K = K.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        V = V.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+#         Q = Q.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+#         K = K.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+#         V = V.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        out = scaled_dot_product_attention(Q, K, V, is_causal=is_causal)
+#         out = scaled_dot_product_attention(Q, K, V, is_causal=is_causal)
 
-        out = out.transpose(1, 2).contiguous().reshape(B, T, D)
+#         out = out.transpose(1, 2).contiguous().reshape(B, T, D)
 
-        return self.out_proj(out)        
+#         return self.out_proj(out)        
 
 
 class MultiHeadAttentionWithRope(nn.Module):
@@ -92,12 +93,18 @@ class MultiHeadAttentionWithRope(nn.Module):
     def forward(self, x, use_cache=False):
         B, T, C = x.shape
         
+        # Context length guard
+        if self.cache_pos + T > self.context_length:
+            raise ValueError(f"Context length exceeded: cache_pos={self.cache_pos}, T={T}, context_length={self.context_length}")
+        
         qkv = self.qkv(x)
         
         qkv = qkv.view(B, T, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.unbind(dim=2)
         
+        # Clamp position indices for extra safety
         pos_ids = torch.arange(self.cache_pos, self.cache_pos + T, device=x.device)
+        pos_ids = torch.clamp(pos_ids, max=self.context_length - 1)
         q = self.rope(q, input_pos=pos_ids)
         k = self.rope(k, input_pos=pos_ids)
         
@@ -105,12 +112,17 @@ class MultiHeadAttentionWithRope(nn.Module):
             if self.k_cache is None or self.k_cache.shape[0] != B:
                 self.setup_cache(B, x.device, x.dtype)
             
-            self.k_cache[:, self.cache_pos : self.cache_pos + T] = k
-            self.v_cache[:, self.cache_pos : self.cache_pos + T] = v
+            # Cache safety: truncate if needed
+            end = min(self.cache_pos + T, self.context_length)
+            k_to_store = k[:, :end - self.cache_pos]
+            v_to_store = v[:, :end - self.cache_pos]
             
-            k_session = self.k_cache[:, : self.cache_pos + T]
-            v_session = self.v_cache[:, : self.cache_pos + T]
-            self.cache_pos += T
+            self.k_cache[:, self.cache_pos : end] = k_to_store
+            self.v_cache[:, self.cache_pos : end] = v_to_store
+            
+            k_session = self.k_cache[:, : end]
+            v_session = self.v_cache[:, : end]
+            self.cache_pos = end
         else:
             k_session, v_session = k, v
         

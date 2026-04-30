@@ -5,29 +5,29 @@ from models.mamma import Mamma
 from torch.utils.data import DataLoader
 from torch.optim import AdamW, lr_scheduler
 from torch.optim.lr_scheduler import LambdaLR
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 import os
 import math
 
-VOCAB_SIZE = 10_000
+VOCAB_SIZE = 32_000
 BATCH_SIZE = 16
 MAX_SAMPLES = 20_000
 MAX_TRAINING_STEPS=1_000_000
-MODEL_NAME = "mama-gpt"
+MODEL_NAME = "mama-gpt-large"
 MODEL_PATH = f"output/{MODEL_NAME}"
 CONTEXT_LENGTH = 1024
 NUM_WORKERS = 16
 LR_SCHEDULER_STEP_SIZE = 10
 MAX_NORM = 1.0
-ACCUMULATION_STEPS = 16
+ACCUMULATION_STEPS = 8
 LEARNING_RATE = 3e-4
 MINIMUM_LEARNING_RATE = 1e-6
 WARM_UP_STEPS=2000
 WEIGHT_DECAY = 0.1
-d_model = 128
-num_heads = 4
-num_layers = 4
-d_ff = 512
+d_model = 768
+num_heads = 12
+num_layers = 12
+d_ff = 3*768
 
 print(f"Training {MODEL_NAME} with\nvocab size = {VOCAB_SIZE}\nbatch size = {BATCH_SIZE}\nmax samples = {MAX_SAMPLES}\ncontext length = {CONTEXT_LENGTH}\nmodel dimension = {d_model}\nnumber of heads = {num_heads}\nnumber of layers = {num_layers}\nfeedforward dimension = {d_ff}\n\n")
 
@@ -120,15 +120,14 @@ batch_loader = DataLoader(
     prefetch_factor=2
 )
 
-def load_checkpoint(path, model, optimizer, scaler, scheduler):
+def load_checkpoint(path, model, optimizer, scheduler):
     if os.path.exists(path):
         print(f"Restoring from {path}")
         ckpt = torch.load(path)
-        model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        scaler.load_state_dict(ckpt['scaler_state_dict'])
-        scheduler.load_state_dict(ckpt['lr_sched_state_dict'])
-        return ckpt['step'], ckpt.get('min_loss', float('inf'))
+        model.load_state_dict(ckpt)
+        # optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        # scheduler.load_state_dict(ckpt['lr_sched_state_dict'])
+        # return ckpt['step'], ckpt.get('min_loss', float('inf'))
     return 0, float('inf')
 
 model = Mamma(
@@ -182,13 +181,11 @@ lr_sched = lr_scheduler.CosineAnnealingWarmRestarts(
     T_mult=2,
     eta_min=MINIMUM_LEARNING_RATE
 )
-scaler = GradScaler()
 loss_fn = torch.nn.CrossEntropyLoss()
 start_step, min_loss = load_checkpoint(
-    f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest.pt", 
+    f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest_sft.pt", 
     model=model, 
     optimizer=optimizer, 
-    scaler=scaler, 
     scheduler=lr_sched
 )
 
@@ -200,16 +197,14 @@ for step, batch in enumerate(batch_loader, start=start_step):
     with autocast(device_type=device, dtype=torch.bfloat16):
         logits = model(x)
         loss = loss_fn(logits.reshape(-1, VOCAB_SIZE), y.reshape(-1))
-        loss = loss / ACCUMULATION_STEPS
+        scaled_loss = loss / ACCUMULATION_STEPS
 
-    # Scaled backprop
-    scaler.scale(loss).backward()
+    # Standard backward pass (no scaler for bfloat16)
+    scaled_loss.backward()
 
     if (step + 1) % ACCUMULATION_STEPS == 0:
-        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_NORM)
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
         optimizer.zero_grad()
         lr_sched.step()  # Step the scheduler
 
@@ -226,7 +221,6 @@ for step, batch in enumerate(batch_loader, start=start_step):
             'step': step,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
             'lr_sched_state_dict': lr_sched.state_dict(),
             'min_loss': min(min_loss, curr_loss)
         }

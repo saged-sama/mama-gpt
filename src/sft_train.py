@@ -1,19 +1,20 @@
+import os
+import torch
 from datasets import load_dataset
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
-import torch
-from models.mamma import Mamma
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.amp import GradScaler, autocast
-import os
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp import autocast
+from src.models.mamma import Mamma
 
+# --- Configuration ---
 VOCAB_SIZE = 50_000
 BATCH_SIZE = 16
 MAX_SAMPLES = 50_000
 MODEL_NAME = "mama-gpt"
 MODEL_PATH = f"output/{MODEL_NAME}"
 CONTEXT_LENGTH = 1024
-NUM_WORKERS = 16
 MAX_NORM = 1.0
 ACCUMULATION_STEPS = 16
 LEARNING_RATE = 2e-5
@@ -23,31 +24,44 @@ num_heads = 12
 num_layers = 12
 d_ff = 3072
 
-print(f"Training {MODEL_NAME} with\nvocab size = {VOCAB_SIZE}\nbatch size = {BATCH_SIZE}\nmax samples = {MAX_SAMPLES}\ncontext length = {CONTEXT_LENGTH}\nmodel dimension = {d_model}\nnumber of heads = {num_heads}\nnumber of layers = {num_layers}\nfeedforward dimension = {d_ff}\n\n")
+print(f"Training {MODEL_NAME} with\nvocab size = {VOCAB_SIZE}\nbatch size = {BATCH_SIZE}\nmax samples = {MAX_SAMPLES}\ncontext length = {CONTEXT_LENGTH}\n\n")
 
+# --- Dataset Loading ---
 print("Loading dataset...")
 ds = load_dataset(
-    "imone/OpenOrca_FLAN",
+    "glnmario/news-qa-summarization",
     split="train",
     streaming=True
 )
 print("Dataset loaded. ✅")
 
+# --- Prompt Formatting ---
+def format_prompt(example):
+    system_prompt = example.get("system", "")
+    story = example.get("story", "")
+    summary = example.get("summary", "")
+    
+    prompt = ""
+    if system_prompt and system_prompt.strip():
+        prompt = f"#####\nSystem:\n{system_prompt}\n\n"
+        
+    # Injecting BOS and EOS directly into the text template
+    prompt += f"<BOS>#####\nInstruction:\n Summarize this article: {story}\n\n#####\nResponse:\n{summary}<EOS>"
+    return prompt
+
+# --- Tokenizer Training ---
 def batch_iterator(batch_size=1000, max_samples=10_000):
     batch = []
     count = 0
-
     for example in ds:
-        batch.append(example["text"])
+        # Train on formatted prompts so it learns the template tokens efficiently
+        batch.append(format_prompt(example))
         count += 1
-
         if len(batch) == batch_size:
             yield batch
             batch = []
-
         if count >= max_samples:
             break
-
     if batch:
         yield batch
 
@@ -72,98 +86,64 @@ else:
     )
 
     tokenizer.train_from_iterator(
-        batch_iterator(
-            batch_size=BATCH_SIZE,
-            max_samples=MAX_SAMPLES
-        ),
+        batch_iterator(batch_size=BATCH_SIZE, max_samples=MAX_SAMPLES),
         trainer=trainer
     )
-
     tokenizer.save(f"{MODEL_PATH}/tokenizer.json")
     print("Tokenizer trained and saved. ✅")
 
-print(f"Total Vocab Size: {tokenizer.get_vocab_size()}\n\n")
-
 PAD_ID = tokenizer.token_to_id("<PAD>")
 
-def format_prompt(example):
-    system_prompt = example.get("system", "")
-    instruction = example.get("instruction", "")
-    response = example.get("response", "")
-    
-    # Use the special token name you defined during tokenizer training
-    eos_token = "<EOS>" 
-    
-    prompt = ""
-    if system_prompt and system_prompt.strip():
-        prompt = f"#####\nSystem:\n{system_prompt}\n\n"
-        
-    prompt += f"#####\nInstruction:\n{instruction}\n\n#####\nResponse:\n{response}{eos_token}"
-    return prompt
-
+# --- Tokenization & Masking Logic ---
 def tokenize_sft_fn(example):
     full_text = format_prompt(example)
     encodings = tokenizer.encode(full_text)
     ids = encodings.ids
     
-    # Truncate if over context length
     if len(ids) > CONTEXT_LENGTH:
         ids = ids[:CONTEXT_LENGTH]
         
+    # No -100 masking for now, train on the whole sequence
     labels = list(ids)
     
-    # 1. Mask the prompt
-    response_marker = "Response:"
-    marker_ids = tokenizer.encode(response_marker).ids
-    
-    try:
-        # Find where "Response:" ends
-        for i in range(len(ids) - len(marker_ids)):
-            if ids[i : i + len(marker_ids)] == marker_ids:
-                response_start_idx = i + len(marker_ids)
-                # Mask everything before the actual response text
-                for j in range(response_start_idx):
-                    labels[j] = -100
-                break
-    except Exception:
-        pass # If marker not found, it'll just train on everything
-
-    # 2. Add Padding
     padding_len = CONTEXT_LENGTH - len(ids)
-    # input_ids get PAD_ID, labels get -100 (ignored by CrossEntropy)
+    
+    # input_ids get PAD_ID, labels get -100 ONLY for padding
     input_ids = ids + [PAD_ID] * padding_len
     labels = labels + [-100] * padding_len
     
+    # Return standard python lists, letting the datasets library handle tensor conversion
     return {
-        "input_ids": torch.tensor(input_ids, dtype=torch.long),
-        "labels": torch.tensor(labels, dtype=torch.long)
+        "input_ids": input_ids,
+        "labels": labels
     }
 
-# Apply this to your streaming dataset
 tokenized_ds = ds.map(tokenize_sft_fn, remove_columns=ds.column_names)
-# Map the dataset (this stays streaming!)
 tokenized_ds = tokenized_ds.with_format("torch")
-print("Dataset tokenized. ✅\n")
 
-# Use a standard DataLoader with the tokenized dataset
+# num_workers=0 is standard for streaming datasets on a single node to prevent data duplication
 batch_loader = DataLoader(
     tokenized_ds,
     batch_size=BATCH_SIZE,
-    num_workers=1,  # Already parallelized in map(), set to 0
+    num_workers=0,  
     pin_memory=True,
-    prefetch_factor=2
+    prefetch_factor=None 
 )
 
-def load_checkpoint(path, model, optimizer, scaler):
+# --- Checkpoint Loading Helper ---
+def load_checkpoint(path, model, optimizer=None, scheduler=None):
     if os.path.exists(path):
-        print(f"Restoring from {path}")
-        ckpt = torch.load(path)
+        print(f"Restoring from {path}...")
+        ckpt = torch.load(path, map_location="cpu")
         model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        scaler.load_state_dict(ckpt['scaler_state_dict'])
-        return ckpt['step'], ckpt.get('min_loss', float('inf'))
+        if optimizer and 'optimizer_state_dict' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        if scheduler and 'scheduler_state_dict' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        return ckpt.get('step', 0), ckpt.get('min_loss', float('inf'))
     return 0, float('inf')
 
+# --- Model Initialization ---
 model = Mamma(
     vocab_size=VOCAB_SIZE,
     dim=d_model,
@@ -173,13 +153,8 @@ model = Mamma(
     hidden_dim=d_ff
 )
 
-ckpt = torch.load(f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest.pt")
-model.load_state_dict(ckpt['model_state_dict'])
-print(f"Model initialized with {sum(p.numel() for p in model.parameters()):,} parameters. ✅\n")
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
-print(f"Model moved to {device} ✅:\n{torch.cuda.get_device_properties(device).name if device == 'cuda' else 'CPU'}\n")
 
 optimizer = AdamW(
     model.parameters(), 
@@ -189,71 +164,93 @@ optimizer = AdamW(
     eps=1e-5
 )
 
-scaler = GradScaler()
+# Added Cosine Annealing Scheduler (Assuming max_samples approx steps)
+total_estimated_steps = (MAX_SAMPLES // (BATCH_SIZE * ACCUMULATION_STEPS)) + 1
+scheduler = CosineAnnealingLR(optimizer, T_max=total_estimated_steps, eta_min=1e-6)
+
 loss_fn = torch.nn.CrossEntropyLoss()
-start_step, min_loss = 0, float("inf")
+
+# Load latest state if available
+latest_ckpt_path = f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest.pt"
+start_step, min_loss = load_checkpoint(latest_ckpt_path, model, optimizer, scheduler)
+
+print(f"Model initialized with {sum(p.numel() for p in model.parameters()):,} parameters on {device}. ✅\n")
+
+# --- Training Loop ---
+model.train()
+running_loss = 0.0
 
 for step, batch in enumerate(batch_loader, start=start_step):
-    # x is all tokens except last, y is all tokens except first
     x = batch["input_ids"].to(device)
     y = batch["labels"].to(device)
     
     inputs = x[:, :-1]
     targets = y[:, 1:]
 
+    # Use bfloat16 for newer GPUs, float16 if you encounter issues on older hardware
     with autocast(device_type=device, dtype=torch.bfloat16):
         logits = model(inputs)
         loss = loss_fn(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
-        loss = loss / ACCUMULATION_STEPS
+        scaled_loss = loss / ACCUMULATION_STEPS
 
-    # Scaled backprop
-    scaler.scale(loss).backward()
+    # Standard backward pass (no scaler for bfloat16)
+    scaled_loss.backward()
+    running_loss += scaled_loss.item()
 
     if (step + 1) % ACCUMULATION_STEPS == 0:
-        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_NORM)
-        scaler.step(optimizer)
-        scaler.update()
+        
+        optimizer.step()
+        scheduler.step()
         optimizer.zero_grad()
 
-    curr_loss = loss.item() * ACCUMULATION_STEPS
-    print(f"Step {step+1}, Loss: {curr_loss:.4f}, Tokens Processed: {((step+1)*BATCH_SIZE*CONTEXT_LENGTH):,}, lr: {LEARNING_RATE:.4e}")
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"Step {step+1}, Loss: {running_loss:.4f}, Tokens Processed: {((step+1)*BATCH_SIZE*CONTEXT_LENGTH):,}, lr: {current_lr:.4e}")
+        
+        # Track for saving best model later
+        curr_eval_loss = running_loss
+        running_loss = 0.0
     
+    # --- Evaluation / Generation Checkpoint ---
     if (step + 1) % 1000 == 0:
+        model.eval()
         test_instruction = "Finish this sentence by saying what today's world is heavily influence by: Today's world is heavily"
-        prompt = f"#####\nInstruction:\n{test_instruction}\n\n#####\nResponse:\n"
+        prompt = f"<BOS>#####\nInstruction:\n{test_instruction}\n\n#####\nResponse:\n"
         
-        print(f"Step {step+1}, generating from prompt:\n{prompt}")
-        
-        checkpoint = {
-            'step': step,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
-            'min_loss': min(min_loss, curr_loss)
-        }
+        print(f"\nStep {step+1}, generating from prompt:\n{prompt}")
         
         prompt_ids = tokenizer.encode(prompt).ids
         prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long).to(device)
         
-        generated_tokens = model.generate(
-            x=prompt_tensor,
-            max_new_tokens=140,
-            temperature=0.2,
-            top_k=50
-        )
+        # Ensure generation doesn't update gradients
+        with torch.no_grad():
+            generated_tokens = model.generate(
+                x=prompt_tensor,
+                max_new_tokens=140,
+                temperature=0.2,
+                top_k=50,
+                pad_token_id="<EOS>"
+            )
         
         decoded_output = tokenizer.decode(generated_tokens[0].tolist())
-        print("\n" + "="*40)
-        print("🤖 GENERATED TEXT:")
-        print("="*40)
+        print("="*40 + "\n🤖 GENERATED TEXT:\n" + "="*40)
         print(decoded_output)
         print("="*40 + "\n")
+        
+        checkpoint = {
+            'step': step + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'min_loss': min(min_loss, curr_eval_loss)
+        }
         
         torch.save(checkpoint, f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest_sft.pt")
         print(f"Latest checkpoint saved at step {step+1}")
         
-        if curr_loss < min_loss:
-            min_loss = curr_loss
+        if curr_eval_loss < min_loss:
+            min_loss = curr_eval_loss
             torch.save(checkpoint, f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_best_sft.pt")
-            print(f"Best checkpoint saved at step {step+1}, loss: {min_loss:.4f}")
+            print(f"🌟 Best checkpoint saved at step {step+1}, loss: {min_loss:.4f}")
+            
+        model.train()

@@ -68,13 +68,15 @@ class Mamma(nn.Module):
         for layer in self.layers:
             layer.attn.reset_cache()
             
+        # Process prompt
         logits = self.forward(x, use_cache=True)
         
-        generated_tokens = []
+        generated_tokens = [x]
         
         for _ in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
             
+            # Penalty only on tokens in original prompt
             for token_id in set(x[0].tolist()):
                 if pad_token_id is None or token_id != pad_token_id:
                     logits_last[0, token_id] /= penalty
@@ -94,10 +96,11 @@ class Mamma(nn.Module):
             
             generated_tokens.append(next_token)
             
+            # Pass only next_token (strictly cached incremental step)
             logits = self.forward(next_token, use_cache=True)
         
         for layer in self.layers:
             layer.attn.reset_cache()
             
         self.train()
-        return torch.cat([x] + generated_tokens, dim=1)
+        return torch.cat(generated_tokens, dim=1)
