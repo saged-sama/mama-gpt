@@ -19,5 +19,9 @@ for summary in summaries:
 bleu = evaluate.load("bleu")
 rouge = evaluate.load("rouge")
 bleu_results = bleu.compute(predictions=predictions, references=bleu_refs)
-rouge_results = bleu.compute(predictions=predictions, references=rouge_refs)
+rouge_results = rouge.compute(predictions=predictions, references=rouge_refs)
+
+with open("logs/bleu_rouge_res.json", "w", encoding="utf-8") as file:
+    file.write(json.dumps({"bleu_results": bleu_results, "rouge_results": rouge_results}, indent=4))
+    
 print(json.dumps({"bleu_results": bleu_results, "rouge_results": rouge_results}, indent=4))

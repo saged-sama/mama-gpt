@@ -6,6 +6,8 @@ import torch
 from transformers import PreTrainedTokenizerFast
 import json
 
+MODEL_NAME = "mama-gpt-large"
+
 class CustomLM(LM):
     def __init__(self, model, tokenizer, batch_size=1):
         super().__init__()
@@ -102,12 +104,12 @@ model = Mamma(
     hidden_dim=3072
 )
 
-checkpoint = torch.load("output/mama-gpt/checkpoint_mama-gpt_latest.pt", map_location="cuda")
+checkpoint = torch.load(f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt", map_location="cuda")
 model.load_state_dict(checkpoint["model_state_dict"])
 model.to(device=device)
 model.eval()
 
-tokenizer = PreTrainedTokenizerFast(tokenizer_file="output/mama-gpt/tokenizer.json")
+tokenizer = PreTrainedTokenizerFast(tokenizer_file=f"output/{MODEL_NAME}/tokenizer.json")
 
 model.device = torch.device(device)
 model.name_or_path = "custom"
@@ -119,7 +121,7 @@ model_obj = CustomLM(model=model, tokenizer=tokenizer, batch_size=16)
 
 models = [
     {
-        "name": "mama-gpt",
+        "name": "{MODEL_NAME}",
         "lm_object": model_obj,
     },
     {

@@ -4,9 +4,9 @@ import torch
 import json
 import os
 
-MAX_EXAMPLES = 100_000
+MAX_EXAMPLES = 100
 CONTEXT_LENGTH = 1024
-VOCAB_SIZE = 50_000
+VOCAB_SIZE = 32_000
 
 # Load model and tokenizer
 print("Loading model and tokenizer...")
@@ -19,8 +19,8 @@ print(f"Tokenizer vocab size: {tokenizer.get_vocab_size()}")
 # Load dataset
 print("Loading dataset...")
 ds = load_dataset(
-    "glnmario/news-qa-summarization",
-    split="train",
+    "EdinburghNLP/xsum",
+    split="test",
     streaming=True
 )
 print("Dataset loaded. ✅\n")
@@ -39,13 +39,13 @@ for example in ds:
         break
     
     try:
-        article = example.get("story", "")
+        article = example.get("document", "")
         
         if not article or len(article.strip()) < 10:
             continue
         
         # Create prompt for summarization
-        prompt = f"#####\nInstruction:\nSummarize this article: {article}\n\n#####\nResponse:\n"
+        prompt = f"<BOS>#####\nInstruction:\nSummarize this article: {article}\n\n#####\nResponse:\n"
         
         # Tokenize prompt
         prompt_ids = tokenizer.encode(prompt).ids

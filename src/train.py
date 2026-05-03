@@ -124,10 +124,10 @@ def load_checkpoint(path, model, optimizer, scheduler):
     if os.path.exists(path):
         print(f"Restoring from {path}")
         ckpt = torch.load(path)
-        model.load_state_dict(ckpt)
-        # optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        # scheduler.load_state_dict(ckpt['lr_sched_state_dict'])
-        # return ckpt['step'], ckpt.get('min_loss', float('inf'))
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        scheduler.load_state_dict(ckpt['lr_sched_state_dict'])
+        return ckpt['step'], ckpt.get('min_loss', float('inf'))
     return 0, float('inf')
 
 model = Mamma(

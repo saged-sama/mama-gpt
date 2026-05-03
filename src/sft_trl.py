@@ -9,6 +9,8 @@ from trl import SFTConfig, SFTTrainer
 from models.mamma import Mamma
 
 
+MODEL_NAME="mama-gpt-large"
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -66,7 +68,7 @@ class HFCompatibleMamma(PreTrainedModel):
 # =========================================================
 # TOKENIZER
 # =========================================================
-tokenizer = PreTrainedTokenizerFast(tokenizer_file="output/mama-gpt/tokenizer.json")
+tokenizer = PreTrainedTokenizerFast(tokenizer_file=f"output/{MODEL_NAME}/tokenizer.json")
 
 tokenizer.pad_token = "<PAD>"
 tokenizer.eos_token = "<EOS>"
@@ -77,19 +79,19 @@ tokenizer.bos_token = "<BOS>"
 # MODEL
 # =========================================================
 raw_model = Mamma(
-    vocab_size=50000,
+    vocab_size=32000,
     dim=768,
     context_length=1024,
     num_layers=12,
     num_heads=12,
-    hidden_dim=3072
+    hidden_dim=3*768
 )
 
 
 # =========================================================
 # LOAD CHECKPOINT
 # =========================================================
-checkpoint_path = "output/mama-gpt/checkpoint_mama-gpt_latest_sft.pt"
+checkpoint_path = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt"
 
 if os.path.exists(checkpoint_path):
     print(f"Loading checkpoint: {checkpoint_path}")
@@ -112,7 +114,7 @@ model = HFCompatibleMamma(raw_model)
 # DATASET (FIXED + PROPER MASKING)
 # =========================================================
 dataset = load_dataset(
-    "glnmario/news-qa-summarization",
+    "microsoft/orca-math-word-problems-200k",
     streaming=True
 )
 
@@ -124,13 +126,13 @@ def preprocess(example):
 
     prompt = f"""<BOS>#####
 Instruction:
-Summarize this article: {example['story']}
+Answer the following question: {example['question']}
 
 #####
 Response:
 """
 
-    full_text = prompt + example["summary"] + "<EOS>"
+    full_text = prompt + example["answer"] + "<EOS>"
 
     prompt_ids = tokenizer(prompt, truncation=True, max_length=1024)["input_ids"]
     full_ids = tokenizer(full_text, truncation=True, max_length=1024)["input_ids"]
@@ -155,7 +157,7 @@ formatted_train_dataset = train_dataset.map(preprocess)
 # TRAINING CONFIG (CLEAN)
 # =========================================================
 training_args = SFTConfig(
-    output_dir="./output/mama-gpt-sft",
+    output_dir=f"./output/{MODEL_NAME}-sft",
 
     per_device_train_batch_size=16,
     # per_device_eval_batch_size=16,
@@ -167,7 +169,7 @@ training_args = SFTConfig(
 
     logging_steps=10,
 
-    max_steps=200,   # 👈 better than epochs for streaming
+    max_steps=500,   # 👈 better than epochs for streaming
 
     # eval_strategy="steps",
     # eval_steps=50,
@@ -212,7 +214,7 @@ trainer.train()
 # =========================================================
 torch.save(
     model.model.state_dict(),
-    "output/mama-gpt/checkpoint_mama-gpt_latest_sft.pt"
+    f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt"
 )
 
 print("Training complete ✅")
