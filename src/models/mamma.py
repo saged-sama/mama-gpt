@@ -43,6 +43,8 @@ class Mamma(nn.Module):
         self.config.num_attention_heads = num_heads
 
         self.embedding = nn.Embedding(vocab_size, dim)
+        # Initialize embedding weights to small values before tying to output layer
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
 
         self.layers = nn.ModuleList([
             Transformer(dim, context_length, num_heads, hidden_dim)
@@ -62,7 +64,9 @@ class Mamma(nn.Module):
         return self.output(x)
     
     @torch.no_grad()
-    def generate(self, x, max_new_tokens=50, temperature=1.0, top_k=None, penalty=1.2, pad_token_id=None):
+    def generate(self, x, max_new_tokens=50, temperature=1.0, top_k=None, penalty=1.2, eos_token_id=None):
+        """Generate tokens. Returns full sequence including prompt."""
+        was_training = self.training
         self.eval()
         
         for layer in self.layers:
@@ -72,17 +76,18 @@ class Mamma(nn.Module):
         logits = self.forward(x, use_cache=True)
         
         generated_tokens = [x]
+        generated_ids = set(x[0].tolist())  # Track all tokens (prompt + generated) for penalty
         
         for _ in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
             
-            # Penalty only on tokens in original prompt
-            for token_id in set(x[0].tolist()):
-                if pad_token_id is None or token_id != pad_token_id:
+            # Apply repetition penalty to all seen tokens
+            for token_id in generated_ids:
+                if eos_token_id is None or token_id != eos_token_id:
                     logits_last[0, token_id] /= penalty
 
-            if pad_token_id is not None:
-                logits_last[:, pad_token_id] = -float("inf")
+            if eos_token_id is not None:
+                logits_last[:, eos_token_id] = -float("inf")
             
             if top_k is not None:
                 v, _ = torch.topk(logits_last, min(top_k, logits_last.size(-1)))
@@ -91,10 +96,11 @@ class Mamma(nn.Module):
             probs = torch.softmax(logits_last, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
 
-            if pad_token_id is not None and torch.all(next_token == pad_token_id):
+            if eos_token_id is not None and torch.all(next_token == eos_token_id):
                 break
             
             generated_tokens.append(next_token)
+            generated_ids.add(next_token.item())  # Track newly generated token for future penalty
             
             # Pass only next_token (strictly cached incremental step)
             logits = self.forward(next_token, use_cache=True)
@@ -102,5 +108,6 @@ class Mamma(nn.Module):
         for layer in self.layers:
             layer.attn.reset_cache()
             
-        self.train()
+        if was_training:
+            self.train()
         return torch.cat(generated_tokens, dim=1)

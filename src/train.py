@@ -1,50 +1,121 @@
 from datasets import load_dataset
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+
 import torch
-from models.mamma import Mamma
-from torch.utils.data import DataLoader
-from torch.optim import AdamW, lr_scheduler
+from torch.utils.data import IterableDataset, DataLoader
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import autocast
+
+import random
 import os
 import math
 
+from models.mamma import Mamma
+
+# =========================================================
+# CONFIG
+# =========================================================
+
 VOCAB_SIZE = 32_000
-BATCH_SIZE = 16
-MAX_SAMPLES = 20_000
-MAX_TRAINING_STEPS=1_000_000
-MODEL_NAME = "mama-gpt-large"
+BATCH_SIZE = 8
+TOKENIZER_SAMPLES = 20_000
+MAX_TRAINING_STEPS = 150_000
+MODEL_NAME = "mama-gpt-larger"
 MODEL_PATH = f"output/{MODEL_NAME}"
-CONTEXT_LENGTH = 1024
-NUM_WORKERS = 16
-LR_SCHEDULER_STEP_SIZE = 10
-MAX_NORM = 1.0
+
+CONTEXT_LENGTH = 3072
+NUM_WORKERS = 0
+
 ACCUMULATION_STEPS = 8
 LEARNING_RATE = 3e-4
-MINIMUM_LEARNING_RATE = 1e-6
-WARM_UP_STEPS=2000
+MINIMUM_LEARNING_RATE = LEARNING_RATE * 0.1
+WARM_UP_STEPS = 2000
 WEIGHT_DECAY = 0.1
+MAX_NORM = 1.0
+
 d_model = 768
 num_heads = 12
 num_layers = 12
-d_ff = 3*768
+d_ff = int(8 * d_model / 3)
 
-print(f"Training {MODEL_NAME} with\nvocab size = {VOCAB_SIZE}\nbatch size = {BATCH_SIZE}\nmax samples = {MAX_SAMPLES}\ncontext length = {CONTEXT_LENGTH}\nmodel dimension = {d_model}\nnumber of heads = {num_heads}\nnumber of layers = {num_layers}\nfeedforward dimension = {d_ff}\n\n")
+os.makedirs(MODEL_PATH, exist_ok=True)
 
-print("Loading dataset...")
-ds = load_dataset(
-    "HuggingFaceFW/fineweb-edu",
+print(f"""
+Training {MODEL_NAME}
+
+vocab size       = {VOCAB_SIZE}
+batch size       = {BATCH_SIZE}
+context length   = {CONTEXT_LENGTH}
+training steps   = {MAX_TRAINING_STEPS}
+accum steps      = {ACCUMULATION_STEPS}
+
+d_model          = {d_model}
+num_heads        = {num_heads}
+num_layers       = {num_layers}
+d_ff             = {d_ff}
+""")
+
+# =========================================================
+# DATASET MIX
+# =========================================================
+
+print("Loading datasets...")
+
+fw = load_dataset(
+    "HuggingFaceTB/smollm-corpus",
+    "fineweb-edu-dedup",
     split="train",
     streaming=True
 )
-print("Dataset loaded. ✅")
 
-def batch_iterator(batch_size=1000, max_samples=10_000):
+cosmo = load_dataset(
+    "HuggingFaceTB/smollm-corpus",
+    "cosmopedia-v2",
+    split="train",
+    streaming=True
+)
+
+print("Datasets loaded. ✅")
+
+DATASETS = [
+    ("fineweb", fw, 0.80),
+    ("cosmo", cosmo, 0.20),
+]
+
+
+def mixed_text_stream():
+    iters = {name: iter(ds) for name, ds, weight in DATASETS}
+
+    while True:
+        r = random.random()
+        cumulative = 0.0
+
+        for name, ds, weight in DATASETS:
+            cumulative += weight
+            if r < cumulative:
+                try:
+                    yield next(iters[name])["text"]
+                except StopIteration:
+                    # Restart exhausted iterator
+                    iters[name] = iter(ds)
+                    yield next(iters[name])["text"]
+                break
+
+
+# =========================================================
+# TOKENIZER
+# =========================================================
+
+tokenizer_path = f"{MODEL_PATH}/tokenizer.json"
+
+
+def batch_iterator(batch_size=1000, max_samples=20_000):
     batch = []
     count = 0
 
-    for example in ds:
-        batch.append(example["text"])
+    for text in mixed_text_stream():
+        batch.append(text)
         count += 1
 
         if len(batch) == batch_size:
@@ -57,19 +128,18 @@ def batch_iterator(batch_size=1000, max_samples=10_000):
     if batch:
         yield batch
 
-tokenizer_path = f"{MODEL_PATH}/tokenizer.json"
-os.makedirs(f"{MODEL_PATH}", exist_ok=True)
 
 if os.path.exists(tokenizer_path):
-    print(f"Loading tokenizer from path: {tokenizer_path}")
+    print("Loading tokenizer...")
     tokenizer = Tokenizer.from_file(tokenizer_path)
-    print("Tokenizer loaded successfully ✅")
+    print("Tokenizer loaded. ✅")
 else:
     print("Training tokenizer...")
+
     tokenizer = Tokenizer(models.BPE(byte_fallback=True))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=True)
     tokenizer.decoder = decoders.ByteLevel()
-    
+
     trainer = trainers.BpeTrainer(
         vocab_size=VOCAB_SIZE,
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
@@ -79,56 +149,57 @@ else:
 
     tokenizer.train_from_iterator(
         batch_iterator(
-            batch_size=BATCH_SIZE,
-            max_samples=MAX_SAMPLES
+            batch_size=1000,
+            max_samples=TOKENIZER_SAMPLES
         ),
         trainer=trainer
     )
 
-    tokenizer.save(f"{MODEL_PATH}/tokenizer.json")
+    tokenizer.save(tokenizer_path)
     print("Tokenizer trained and saved. ✅")
 
-print(f"Total Vocab Size: {tokenizer.get_vocab_size()}\n\n")
+bos_id = tokenizer.token_to_id("<BOS>")
+eos_id = tokenizer.token_to_id("<EOS>")
+print(f"Tokenizer vocab size: {tokenizer.get_vocab_size()}")
 
 
-def tokenize_fn(examples):
-    """Tokenize examples in parallel across num_workers."""
-    encodings = tokenizer.encode_batch(examples["text"])
-    input_ids = []
-    
-    for enc in encodings:
-        ids = enc.ids[:CONTEXT_LENGTH + 1]
-        ids = ids + [0] * (CONTEXT_LENGTH + 1 - len(ids))
-        input_ids.append(ids)
-    
-    return {
-        "input_ids": input_ids
-    }
+# =========================================================
+# TOKENIZED STREAMING DATASET
+# =========================================================
 
-# Map the dataset (this stays streaming!)
-print("Tokenizing dataset with parallel workers...")
-tokenized_ds = ds.map(tokenize_fn, batched=True, remove_columns=ds.column_names)
-tokenized_ds = tokenized_ds.with_format("torch")
-print("Dataset tokenized. ✅\n")
+class PackedDataset(IterableDataset):
+    def __iter__(self):
+        buffer = []
 
-# Use a standard DataLoader with the tokenized dataset
+        for text in mixed_text_stream():
+            ids = tokenizer.encode(text).ids
+
+            # add explicit document boundaries
+            ids = [bos_id] + ids + [eos_id]
+
+            buffer.extend(ids)
+
+            while len(buffer) >= CONTEXT_LENGTH + 1:
+                chunk = buffer[:CONTEXT_LENGTH + 1]
+                buffer = buffer[CONTEXT_LENGTH + 1:]
+
+                yield {
+                    "input_ids": torch.tensor(chunk, dtype=torch.long)
+                }
+
+
+train_ds = PackedDataset()
+
 batch_loader = DataLoader(
-    tokenized_ds,
+    train_ds,
     batch_size=BATCH_SIZE,
-    num_workers=NUM_WORKERS,  # Already parallelized in map(), set to 0
-    pin_memory=True,
-    prefetch_factor=2
+    num_workers=NUM_WORKERS,
+    pin_memory=True
 )
 
-def load_checkpoint(path, model, optimizer, scheduler):
-    if os.path.exists(path):
-        print(f"Restoring from {path}")
-        ckpt = torch.load(path)
-        model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        scheduler.load_state_dict(ckpt['lr_sched_state_dict'])
-        return ckpt['step'], ckpt.get('min_loss', float('inf'))
-    return 0, float('inf')
+# =========================================================
+# MODEL
+# =========================================================
 
 model = Mamma(
     vocab_size=VOCAB_SIZE,
@@ -138,110 +209,153 @@ model = Mamma(
     num_heads=num_heads,
     hidden_dim=d_ff
 )
-print(f"Model initialized with {sum(p.numel() for p in model.parameters()):,} parameters. ✅\n")
+
+print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
-print(f"Model moved to {device} ✅:\n{torch.cuda.get_device_properties(device).name if device == 'cuda' else 'CPU'}\n")
 
-def get_cosine_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps,
-    num_training_steps,
-    min_lr_ratio=0.1  # final LR = 10% of peak
-):
-    def lr_lambda(current_step):
-        # 🔥 Warmup phase
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
+print(f"Using device: {device}")
 
-        # 🔥 Cosine decay phase
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
+# Autocast dtype: bfloat16 on CUDA, float32 on CPU
+autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
 
-        # scale to [min_lr_ratio, 1]
-        return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
-
-    return LambdaLR(optimizer, lr_lambda)
+# =========================================================
+# OPTIMIZER / SCHEDULER
+# =========================================================
 
 optimizer = AdamW(
-    model.parameters(), 
-    lr=LEARNING_RATE, 
+    model.parameters(),
+    lr=LEARNING_RATE,
     weight_decay=WEIGHT_DECAY,
     betas=(0.9, 0.95),
     eps=1e-5
 )
 
-lr_sched = lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer=optimizer,
-    T_0=WARM_UP_STEPS,
-    T_mult=2,
-    eta_min=MINIMUM_LEARNING_RATE
-)
-loss_fn = torch.nn.CrossEntropyLoss()
-start_step, min_loss = load_checkpoint(
-    f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest_sft.pt", 
-    model=model, 
-    optimizer=optimizer, 
-    scheduler=lr_sched
-)
 
-for step, batch in enumerate(batch_loader, start=start_step):
-    # x is all tokens except last, y is all tokens except first
+def lr_lambda(current_step):
+    if current_step < WARM_UP_STEPS:
+        return current_step / max(1, WARM_UP_STEPS)
+
+    progress = (current_step - WARM_UP_STEPS) / max(
+        1,
+        MAX_TRAINING_STEPS - WARM_UP_STEPS
+    )
+
+    cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+
+    min_ratio = MINIMUM_LEARNING_RATE / LEARNING_RATE
+    return min_ratio + (1 - min_ratio) * cosine_decay
+
+
+lr_sched = LambdaLR(optimizer, lr_lambda)
+
+loss_fn = torch.nn.CrossEntropyLoss()
+
+# =========================================================
+# TRAIN
+# =========================================================
+
+optimizer.zero_grad()
+optimizer_step = 0
+raw_step = 0
+
+# checkpoint_path = f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest.pt"
+# chkpt = torch.load(checkpoint_path)
+
+# model.load_state_dict(chkpt['model_state_dict'])
+# optimizer.load_state_dict(chkpt['optimizer_state_dict'])
+# lr_sched.load_state_dict(chkpt['lr_sched_state_dict'])
+# optimizer_step = chkpt.get('optimizer_step', 0)
+# raw_step = chkpt.get('raw_step', 0)
+step = raw_step
+
+for step, batch in enumerate(batch_loader, start=step):
+    if optimizer_step >= MAX_TRAINING_STEPS:
+        break
+
     x = batch["input_ids"][:, :-1].to(device)
     y = batch["input_ids"][:, 1:].to(device)
 
-    with autocast(device_type=device, dtype=torch.bfloat16):
+    with autocast(device_type=device, dtype=autocast_dtype, enabled=(device == "cuda")):
         logits = model(x)
-        loss = loss_fn(logits.reshape(-1, VOCAB_SIZE), y.reshape(-1))
+        loss = loss_fn(
+            logits.reshape(-1, VOCAB_SIZE),
+            y.reshape(-1)
+        )
         scaled_loss = loss / ACCUMULATION_STEPS
 
-    # Standard backward pass (no scaler for bfloat16)
     scaled_loss.backward()
 
     if (step + 1) % ACCUMULATION_STEPS == 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_NORM)
-        optimizer.step()
-        optimizer.zero_grad()
-        lr_sched.step()  # Step the scheduler
 
-    lrs = lr_sched.get_last_lr()
-    curr_loss = loss.item() * ACCUMULATION_STEPS
-    print(f"Step {step+1}, Loss: {curr_loss:.4f}, Tokens Processed: {((step+1)*BATCH_SIZE*CONTEXT_LENGTH):,}, lr: {(sum(lrs) / len(lrs)):.4e}")
-    
-    if (step + 1) % 1000 == 0:
-        prompt = "Today's world is heavily "
-        
-        print(f"Step {step+1}, generating from prompt: {prompt}")
-        
-        checkpoint = {
-            'step': step,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'lr_sched_state_dict': lr_sched.state_dict(),
-            'min_loss': min(min_loss, curr_loss)
-        }
-        
-        prompt_ids = tokenizer.encode(prompt).ids
-        prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long).to(device)
-        
-        generated_tokens = model.generate(
-            x=prompt_tensor,
-            max_new_tokens=40,
-            temperature=0.7,
-            top_k=50
+        optimizer.step()
+        lr_sched.step()
+        optimizer.zero_grad()
+
+        optimizer_step += 1
+
+        tokens_processed = (
+            optimizer_step
+            * BATCH_SIZE
+            * ACCUMULATION_STEPS
+            * CONTEXT_LENGTH
+        )
+
+        current_lr = lr_sched.get_last_lr()[0]
+
+        print(
+            f"Step {optimizer_step:>6} | "
+            f"Loss {loss.item():.4f} | "
+            f"Tokens {tokens_processed:,} | "
+            f"LR {current_lr:.4e}"
         )
         
-        decoded_output = tokenizer.decode(generated_tokens[0].tolist())
-        print(f"Generated Text:\n{decoded_output}")
-        
-        torch.save(checkpoint, f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest.pt")
-        print(f"Latest checkpoint saved at step {step+1}")
-        
-        if curr_loss < min_loss:
-            min_loss = curr_loss
-            torch.save(checkpoint, f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_best.pt")
-            print(f"Best checkpoint saved at step {step+1}, loss: {min_loss:.4f}")
+        raw_step = step
+
+        # =================================================
+        # SAMPLE GENERATION (every 10 steps)
+        # =================================================
+        if optimizer_step % 250 == 0:
+            prompt = "It's two hearts living"
+
+            prompt_ids = tokenizer.encode(prompt).ids
+            prompt_tensor = torch.tensor(
+                [prompt_ids],
+                dtype=torch.long
+            ).to(device)
+
+            generated = model.generate(
+                x=prompt_tensor,
+                max_new_tokens=40,
+                temperature=1.0,
+                top_k=None,
+                # eos_token_id=eos_id
+            )
+
+            text = tokenizer.decode(generated[0].tolist())
+
+            print("\n--- SAMPLE ---")
+            print(text)
+            print("--------------\n")
+
+        # =================================================
+        # CHECKPOINT SAVE (every 500 steps)
+        # =================================================
+        if optimizer_step % 500 == 0:
+            checkpoint = {
+                "optimizer_step": optimizer_step,
+                "raw_step": raw_step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "lr_sched_state_dict": lr_sched.state_dict(),
+            }
+
+            torch.save(
+                checkpoint,
+                f"{MODEL_PATH}/checkpoint_{MODEL_NAME}_latest.pt"
+            )
+
+print("Training finished.")
