@@ -3,7 +3,7 @@ from src.models.mamma import Mamma
 from tokenizers import Tokenizer, decoders
 import time
 
-MODEL_NAME = "mama-gpt-large"
+MODEL_NAME = "mama-gpt-larger"
 MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
@@ -11,8 +11,8 @@ VOCAB_SIZE = 32_000
 D_MODEL = 768
 NUM_HEADS = 12
 NUM_LAYERS = 12
-D_FF = 3*768
-CONTEXT_LENGTH = 1024
+D_FF = int(8 * 768 / 3)
+CONTEXT_LENGTH = 3072
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -82,7 +82,7 @@ def chat():
                 max_new_tokens=512,
                 temperature=1.0,
                 top_k=None,
-                pad_token_id=tokenizer.token_to_id("<EOS>")
+                # eos_token_id=tokenizer.token_to_id("<EOS>")
             )
         
         # Decode and print
