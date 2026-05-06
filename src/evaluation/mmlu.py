@@ -96,16 +96,16 @@ class CustomLM(LM):
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = Mamma(
-    vocab_size=50000,
+    vocab_size=32000,
     dim=768,
     context_length=1024,
     num_layers=12,
     num_heads=12,
-    hidden_dim=3072
+    hidden_dim=3*768
 )
 
 checkpoint = torch.load(f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt", map_location="cuda")
-model.load_state_dict(checkpoint["model_state_dict"])
+model.load_state_dict(checkpoint)
 model.to(device=device)
 model.eval()
 
@@ -121,7 +121,7 @@ model_obj = CustomLM(model=model, tokenizer=tokenizer, batch_size=16)
 
 models = [
     {
-        "name": "{MODEL_NAME}",
+        "name": f"{MODEL_NAME}",
         "lm_object": model_obj,
     },
     {

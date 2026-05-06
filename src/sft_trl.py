@@ -114,7 +114,7 @@ model = HFCompatibleMamma(raw_model)
 # DATASET (FIXED + PROPER MASKING)
 # =========================================================
 dataset = load_dataset(
-    "microsoft/orca-math-word-problems-200k",
+    "tiedong/goat",
     streaming=True
 )
 
@@ -126,13 +126,13 @@ def preprocess(example):
 
     prompt = f"""<BOS>#####
 Instruction:
-Answer the following question: {example['question']}
+Answer the following question: {example['instruction']}
 
 #####
 Response:
 """
 
-    full_text = prompt + example["answer"] + "<EOS>"
+    full_text = prompt + example["output"] + "<EOS>"
 
     prompt_ids = tokenizer(prompt, truncation=True, max_length=1024)["input_ids"]
     full_ids = tokenizer(full_text, truncation=True, max_length=1024)["input_ids"]

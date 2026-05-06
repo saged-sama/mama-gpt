@@ -1,23 +1,52 @@
 from datasets import load_dataset
 from collections import Counter
+from langchain_core.documents import Document
 
-print("Loading Datasets...", end="")
-ds = load_dataset(
-    "deepmind/narrativeqa",
-    split="train"
-)
-print("✅")
+def get_top_docs(max_docs: int = 10):
+    print("Loading Datasets...", end="")
+    ds = load_dataset(
+        "deepmind/narrativeqa",
+        split="train"
+    )
+    print("✅")
 
-doc_counts = Counter()
+    doc_counts = Counter()
 
-print("Retrieving top 10 docs...", end="")
-for item in ds:
-    doc_id = item["document"]["id"]
-    doc_counts[doc_id] += 1
+    print(f"Retrieving top {max_docs} docs...", end="")
+    for item in ds:
+        doc_id = item["document"]["id"]
+        doc_counts[doc_id] += 1
+        
+    top_doc_ids = set([
+        doc_id for doc_id, _ in doc_counts.most_common(max_docs)
+    ])
     
-top_10_doc_ids = set([
-    doc_id for doc_id, _ in doc_counts.most_common(10)
-])
-
-top_docs = ds.filter(lambda x: x["document"]["id"] in top_10_doc_ids)
-print("✅")
+    queries_and_answers = {}
+    seen_doc_ids = set()
+    docs = []
+    
+    for item in ds:
+        doc_id = item["document"]["id"]
+        if doc_id in top_doc_ids:
+            # Only create one Document per unique doc_id
+            if doc_id not in seen_doc_ids:
+                docs.append(Document(
+                    page_content=item["document"]["summary"]["text"], 
+                    metadata={
+                        "id": doc_id,
+                        "kind": item["document"]["kind"],
+                        "url": item["document"]["url"]
+                    }
+                ))
+                seen_doc_ids.add(doc_id)
+            
+            # Store all Q&A for this doc
+            if queries_and_answers.get(doc_id) is None:
+                queries_and_answers[doc_id] = []
+            queries_and_answers[doc_id].append({
+                "query": item["question"],
+                "answer": item["answers"][0]["text"]
+            })
+    
+    print("✅")
+    return docs, queries_and_answers
