@@ -41,6 +41,8 @@ def load_model():
     
     model.to(DEVICE)
     model.eval() # Set to evaluation mode
+    
+    print(f"Model loaded with parameters count: {sum(p.numel() for p in model.parameters()):,}")
     return model, tokenizer
 
 def chat():
@@ -82,7 +84,7 @@ def chat():
                 max_new_tokens=512,
                 temperature=1.0,
                 top_k=None,
-                # eos_token_id=tokenizer.token_to_id("<EOS>")
+                eos_token_id=tokenizer.token_to_id("<EOS>")
             )
         
         # Decode and print
