@@ -44,8 +44,8 @@ def get_top_docs(max_docs: int = 10):
             if queries_and_answers.get(doc_id) is None:
                 queries_and_answers[doc_id] = []
             queries_and_answers[doc_id].append({
-                "query": item["question"],
-                "answer": item["answers"][0]["text"]
+                "query": item["question"]["text"],
+                "answers": [answer["text"] for answer in item["answers"]]
             })
     
     print("✅")
