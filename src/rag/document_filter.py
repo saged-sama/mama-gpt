@@ -45,8 +45,10 @@ def get_top_docs(max_docs: int = 10):
                 queries_and_answers[doc_id] = []
             queries_and_answers[doc_id].append({
                 "query": item["question"]["text"],
-                "answers": [answer["text"] for answer in item["answers"]]
+                "answer": item["answers"][0]["text"]
             })
     
     print("✅")
+    import json
+    print(json.dumps(queries_and_answers, indent=4))
     return docs, queries_and_answers

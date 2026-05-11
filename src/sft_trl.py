@@ -6,10 +6,11 @@ from transformers import PreTrainedTokenizerFast, PretrainedConfig, PreTrainedMo
 from transformers.modeling_outputs import CausalLMOutput
 from trl import SFTConfig, SFTTrainer
 
-from models.mamma import Mamma
+from src.models.mamma import Mamma
 
 
-MODEL_NAME="mama-gpt-large"
+MODEL_NAME="mama-gpt-larger"
+CONTEXT_LENGTH=3072
 
 # =========================================================
 # CONFIG
@@ -54,6 +55,11 @@ class HFCompatibleMamma(PreTrainedModel):
             # ✅ TRL/HF EXPECTS SHIFT HERE (we keep it correct & simple)
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
+            
+            # non_masked = (labels != -100).sum().item()
+            # total = labels.numel()
+            # print(f"labels shape: {labels.shape}, non-masked: {non_masked}/{total}, "
+            #     f"sample: {labels[0, -10:].tolist()}")
 
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -79,19 +85,19 @@ tokenizer.bos_token = "<BOS>"
 # MODEL
 # =========================================================
 raw_model = Mamma(
-    vocab_size=32000,
+    vocab_size=32_000,
     dim=768,
-    context_length=1024,
+    context_length=CONTEXT_LENGTH,
     num_layers=12,
     num_heads=12,
-    hidden_dim=3*768
+    hidden_dim=int(8*768/3)
 )
 
 
 # =========================================================
 # LOAD CHECKPOINT
 # =========================================================
-checkpoint_path = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt"
+checkpoint_path = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest.pt"
 
 if os.path.exists(checkpoint_path):
     print(f"Loading checkpoint: {checkpoint_path}")
@@ -109,12 +115,14 @@ else:
 
 model = HFCompatibleMamma(raw_model)
 
+model.model.train()
+
 
 # =========================================================
 # DATASET (FIXED + PROPER MASKING)
 # =========================================================
 dataset = load_dataset(
-    "tiedong/goat",
+    "glnmario/news-qa-summarization",
     streaming=True
 )
 
@@ -123,25 +131,30 @@ train_dataset = dataset["train"]
 
 def preprocess(example):
     # system = example.get("system", "")
+    
+    story: str = example['story']
+    
+    clean_story = story.split(" -- ", 1)[-1]
 
-    prompt = f"""<BOS>#####
-Instruction:
-Answer the following question: {example['instruction']}
+    prompt = (
+        f"<context>{clean_story}</context>\n"
+        f"<summary>"
+    )
 
-#####
-Response:
-"""
+    summary_ids = tokenizer(example["summary"] + "</summary><EOS>",
+                        truncation=False)["input_ids"]
+    prompt_ids  = tokenizer(prompt, truncation=False)["input_ids"]
 
-    full_text = prompt + example["output"] + "<EOS>"
+    # Truncate prompt (not the completion) if needed
+    max_prompt = CONTEXT_LENGTH - len(summary_ids)
+    prompt_ids = prompt_ids[:max_prompt]
 
-    prompt_ids = tokenizer(prompt, truncation=True, max_length=1024)["input_ids"]
-    full_ids = tokenizer(full_text, truncation=True, max_length=1024)["input_ids"]
+    full_ids = prompt_ids + summary_ids
+    labels = [-100] * len(prompt_ids) + summary_ids.copy()
 
-    labels = full_ids.copy()
-
-    # ✅ CRITICAL FIX: mask prompt tokens
-    labels[:len(prompt_ids)] = [-100] * len(prompt_ids)
-
+    # Hard cap just in case
+    full_ids = full_ids[:CONTEXT_LENGTH]
+    labels   = labels[:CONTEXT_LENGTH]
     return {
         "input_ids": full_ids,
         "labels": labels
@@ -149,9 +162,19 @@ Response:
 
 
 print("Processing dataset...")
+# train_dataset = train_dataset.filter(lambda x: len(x["answers"]["text"]) > 0)
+# val_dataset = val_dataset.filter(lambda x: len(x["answers"]["text"]) > 0)
 formatted_train_dataset = train_dataset.map(preprocess)
 # formatted_val_dataset = val_dataset.map(preprocess)
 
+# sample = next(iter(formatted_val_dataset))
+# answer_ids = [l for l in sample["labels"] if l != -100]
+# prompt_mask_count = len([l for l in sample["labels"] if l == -100])
+
+# print(f"Prompt tokens (masked): {prompt_mask_count}")
+# print(f"Answer token ids: {answer_ids}")
+# print(f"Answer decoded: {tokenizer.decode(answer_ids)}")
+# print(f"Original answer: {next(iter(val_dataset.filter(lambda x: len(x['answers']['text']) > 0)))['answers']['text'][0]}")
 
 # =========================================================
 # TRAINING CONFIG (CLEAN)
@@ -169,19 +192,19 @@ training_args = SFTConfig(
 
     logging_steps=10,
 
-    max_steps=500,   # 👈 better than epochs for streaming
+    max_steps=1300,   # 👈 better than epochs for streaming
 
     # eval_strategy="steps",
-    # eval_steps=50,
+    # eval_steps=500,
     save_strategy="no",
     report_to="none",
 
     bf16=torch.cuda.is_bf16_supported(),
     fp16=not torch.cuda.is_bf16_supported(),
 
-    optim="adamw_torch",
+    optim="adamw_8bit",
 
-    max_length=1024,
+    max_length=CONTEXT_LENGTH,
     gradient_checkpointing=False,
 
     # ✅ IMPORTANT FOR STABILITY
@@ -208,6 +231,7 @@ trainer = SFTTrainer(
 print("Starting SFT training...")
 trainer.train()
 
+model.model.eval()
 
 # =========================================================
 # SAVE

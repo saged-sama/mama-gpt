@@ -4,7 +4,7 @@ from tokenizers import Tokenizer, decoders
 import time
 
 MODEL_NAME = "mama-gpt-larger"
-MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest.pt"
+MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
 VOCAB_SIZE = 32_000
@@ -37,13 +37,21 @@ def load_model():
     
     # If your checkpoint was the new 'dictionary' style, you'd use state_dict['model_state_dict']
     # But for your 5B token model, it's just the raw dict:
-    model.load_state_dict(state_dict['model_state_dict'])
+    # model.load_state_dict(state_dict['model_state_dict'])
+    model.load_state_dict(state_dict)
+    
     
     model.to(DEVICE)
     model.eval() # Set to evaluation mode
     
     print(f"Model loaded with parameters count: {sum(p.numel() for p in model.parameters()):,}")
     return model, tokenizer
+
+def format_prompt(context):
+    return (
+        f"<context>{context}</context>\n"
+        "<summary>"
+    )
 
 def chat():
     model, tokenizer = load_model()
@@ -53,51 +61,29 @@ def chat():
     print("="*50 + "\n")
 
     while True:
-        lines = []
-        print("User: ")
-        while True:
-            line = input()
-            if not lines and line.lower() in ['exit', 'quit', "q"]:
-                return
-            if line == "#$%@":
-                break
-            lines.append(line)
+        print("Story: ")
+        context = input()
+        # print("Question: ")
+        # question = input()
 
-        prompt = "\n".join(lines)
-        
-        if not prompt.strip():
-            continue
+        prompt = format_prompt(context=context)
 
-        # Encode input
         encoded = tokenizer.encode(prompt)
         x = torch.tensor([encoded.ids], dtype=torch.long).to(DEVICE)
-        
-        print("\nMamma: ", end="", flush=True)
-        
-        # Generation
-        # Note: Ensure your generate() method in mamma.py uses use_cache=True now!
-        start_time = time.time()
-        
+
         with torch.no_grad():
             output_tensor = model.generate(
                 x=x,
-                max_new_tokens=512,
-                temperature=1.0,
-                top_k=None,
+                max_new_tokens=512,   # answers are short, no need for 512
+                temperature=0.1,      # lower = more focused/factual
+                top_k=10,
                 eos_token_id=tokenizer.token_to_id("<EOS>")
             )
-        
-        # Decode and print
+
         full_text = tokenizer.decode(output_tensor[0].tolist())
-        
-        # Clean up output (optional: remove the prompt from the start)
-        new_text = full_text[len(prompt):]
-        print(new_text.strip())
-        
-        end_time = time.time()
-        tokens_gen = output_tensor.shape[1] - x.shape[1]
-        print(f"\n\n[Generated {tokens_gen} tokens in {end_time - start_time:.2f}s]")
-        print("-" * 30)
+        # strip everything up to and including "Response:\n"
+        answer = full_text.split("Response:")[-1].strip()
+        print(f"\nMamma: {answer}")
 
 if __name__ == "__main__":
     chat()
