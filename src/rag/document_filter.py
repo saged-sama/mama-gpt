@@ -28,10 +28,9 @@ def get_top_docs(max_docs: int = 10):
     for item in ds:
         doc_id = item["document"]["id"]
         if doc_id in top_doc_ids:
-            # Only create one Document per unique doc_id
             if doc_id not in seen_doc_ids:
                 docs.append(Document(
-                    page_content=item["document"]["summary"]["text"], 
+                    page_content=item["document"]["text"], 
                     metadata={
                         "id": doc_id,
                         "kind": item["document"]["kind"],
@@ -40,7 +39,6 @@ def get_top_docs(max_docs: int = 10):
                 ))
                 seen_doc_ids.add(doc_id)
             
-            # Store all Q&A for this doc
             if queries_and_answers.get(doc_id) is None:
                 queries_and_answers[doc_id] = []
             queries_and_answers[doc_id].append({

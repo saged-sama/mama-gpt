@@ -1,9 +1,9 @@
 from sentence_transformers import CrossEncoder
 from langchain_core.documents import Document
 
-model = CrossEncoder("BAAI/bge-reranker-base")
+model = CrossEncoder("BAAI/bge-reranker-v2-m3", device="cuda")
 
-def rerank(query: str, docs, top_k: int = 5) -> list[Document]:
+def rerank(query: str, docs, top_k: int = 5, threshold: float = 0.7) -> list[Document]:
     docs_curated = []
     for item in docs:
         doc, _ = item
@@ -19,4 +19,6 @@ def rerank(query: str, docs, top_k: int = 5) -> list[Document]:
         reverse=True
     )
 
-    return [doc for doc, _ in ranked[:top_k]]
+    return [doc for doc, score in ranked[:top_k]
+                if score >= threshold
+            ]

@@ -6,58 +6,42 @@ from hybrid_search import HybridSearch
 from rate_limited_embeddings import LocalEmbeddings
 from re_ranker import rerank
 import json
+import random
+import gc
+import torch
 
 from langchain_ollama import ChatOllama
 
 from openai import AsyncOpenAI
 
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 80
+# Memory optimization constants
+CHUNK_SIZE = 1500
+CHUNK_OVERLAP = 200
 
 MAX_DOCS = 10
-MAX_QUESTION_PER_DOC = 10
+MAX_QUESTION_PER_DOC = 5  # Reduced from 10 to save memory
+RRF_CANDIDATES = 50  # Reduced from 100 to save memory
+TOP_K = 5
+MAX_CONTEXT_LENGTH = 2000  # Limit context window to prevent OOM
+BATCH_SIZE = 5  # Process in smaller batches
 
-# ── Document loading ──────────────────────────────────────────────────────────
 top_docs, queries_and_answers = get_top_docs(max_docs=MAX_DOCS)
 
-# ── Embeddings ────────────────────────────────────────────────────────────────
-embeddings = LocalEmbeddings(model_name="all-MiniLM-L6-v2")
+# Single reusable embeddings instance
+embeddings = LocalEmbeddings(model_name="BAAI/bge-large-en-v1.5")
 
-# ── RAG generation LLM (unchanged) ───────────────────────────────────────────
 rag_llm = ChatOllama(
     model="gemma4:31b",
     temperature=0.1,
+    # num_gpu=1,  # Limit GPU layers
 )
 
-# ── Judge LLM for ragas evaluation ───────────────────────────────────────────
-# FIX 4 (continued): AsyncOpenAI pointing at local Ollama
 ollama_client = AsyncOpenAI(
-    api_key="ollama",                      # any non-empty string is fine
-    base_url="http://localhost:11434/v1",
+    api_key="ollama",
+    base_url="http://localhost:11434",
 )
 
-# judge_llm = llm_factory(
-#     "gemma4:31b",
-#     provider="openai",   # uses the OpenAI-compatible Instructor adapter
-#     client=ollama_client,
-# )
-
-# judge_embeddings = embedding_factory(
-#     model="nomic-embed-text", 
-#     provider="openai", 
-#     client=ollama_client
-# )
-
-# FIX 3 (continued): instantiate metrics with the judge llm
-# context_precision_scorer = ContextPrecision(llm=judge_llm)
-# faithfulness_scorer = Faithfulness(llm=judge_llm)
-# metrics = [
-#     context_precision_scorer,
-#     faithfulness_scorer
-# ]
-
-# ── Text splitters ────────────────────────────────────────────────────────────
-text_splitter_strategies = ["fixed", "recursive", "semantic"]
+text_splitter_strategies = ["semantic"]
 
 text_splitters = {
     "fixed": RecursiveCharacterTextSplitter(
@@ -71,12 +55,12 @@ text_splitters = {
     ),
 }
 
-# ── Initialise searchers ──────────────────────────────────────────────────────
 all_searchers: dict = {}
 
 print("\n[INIT] Preparing RAG system...")
 print(f"  Documents: {len(top_docs)}")
-print(f"  Chunk size: {CHUNK_SIZE}, Overlap: {CHUNK_OVERLAP}\n")
+print(f"  Chunk size: {CHUNK_SIZE}, Overlap: {CHUNK_OVERLAP}")
+print(f"  Max context length: {MAX_CONTEXT_LENGTH} chars\n")
 
 for strategy in text_splitter_strategies:
     print(f"[INIT] {strategy.capitalize()} strategy:")
@@ -85,24 +69,39 @@ for strategy in text_splitter_strategies:
     print(f"  Initializing HybridSearch...")
     all_searchers[strategy] = HybridSearch(docs=splits, embeddings_model=embeddings)
     print(f"  ✓ Ready\n")
+    
+    # Memory cleanup after initialization
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-
-# ── RAG helpers ───────────────────────────────────────────────────────────────
 def search_rag(
     query: str,
     text_splitter_strategy: Literal["fixed", "recursive", "semantic"],
     re_ranking: bool = True,
+    rrf_candidates: int = RRF_CANDIDATES,
     top_k: int = 5,
 ):
     print(f"\n[SEARCH] Using '{text_splitter_strategy}' strategy")
     searcher = all_searchers[text_splitter_strategy]
-    results = searcher.search(query=query, top_k=top_k)
+    results = searcher.search(query=query, top_k=rrf_candidates)
     if re_ranking:
-        results = rerank(query=query, docs=results, top_k=top_k)
+        results = rerank(query=query, docs=results, top_k=top_k, threshold=0.0)
     return results
 
 
+def truncate_context(context_text: str, max_length: int = MAX_CONTEXT_LENGTH) -> str:
+    """Truncate context to prevent OOM errors in LLM inference."""
+    if len(context_text) > max_length:
+        context_text = context_text[:max_length] + "..."
+        print(f"[WARN] Context truncated to {max_length} chars")
+    return context_text
+
+
 def generate_response_based_on_context(query: str, context: str) -> str:
+    # Truncate context to prevent memory overflow
+    # context = truncate_context(context, MAX_CONTEXT_LENGTH)
+    
     prompt = f"""
     ###
     Context: {context}
@@ -136,29 +135,31 @@ def ask_rag(
         query=query,
         text_splitter_strategy=text_splitter_strategy,
         re_ranking=True,
-        top_k=5,
+        top_k=TOP_K,
     )
     cont_text = "\n\n".join([doc.page_content for doc in context])
     answer = generate_response_based_on_context(query=query, context=cont_text)
+    
+    # Explicit cleanup after each query
+    del cont_text
+    gc.collect()
+    
     return answer, context
 
-
-# ── Benchmarking loop ─────────────────────────────────────────────────────────
-benchmark_results: dict = {}
+# benchmark_results: dict = {}
 
 for strategy in text_splitter_strategies:
 
     print(f"\n\n======================")
     print(f"BENCHMARKING: {strategy}")
     print(f"======================")
-
-    # FIX 1 + FIX 2: build a list of SingleTurnSample objects instead of a
-    # plain dict with v0.3 column names.
+    
     samples: list = []
+    batch_count = 0
 
     for doc_id in queries_and_answers.keys():
         question_count = 0
-        for qna in queries_and_answers[doc_id]:
+        for qna in random.choices(queries_and_answers[doc_id], k=min(MAX_QUESTION_PER_DOC, len(queries_and_answers[doc_id]))):
             question_count += 1
             question, expected_output = qna["query"], qna["answer"]
             answer, context = ask_rag(query=question, text_splitter_strategy=strategy)
@@ -176,45 +177,30 @@ for strategy in text_splitter_strategies:
                 "retrieval_context": [d.page_content for d in context]
             })
             
+            batch_count += 1
+            
+            # Memory cleanup every batch
+            if batch_count % BATCH_SIZE == 0:
+                print(f"[MEM] Batch cleanup at {batch_count} samples...")
+                del context
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
             if question_count == MAX_QUESTION_PER_DOC:
                 break
-
-    # FIX 1 (continued): wrap samples in EvaluationDataset
-    # dataset = EvaluationDataset(samples=samples)
-    benchmark_results[strategy] = samples
-
-with open("output/rag/out.json", "w") as f:
-    f.write(json.dumps(benchmark_results, indent=4))
+            
+    print(f"\n[DONE] Processed {len(samples)} samples for '{strategy}' strategy")
+    with open(f"output/rag/out_{strategy}.json", "w") as f:
+        f.write(json.dumps(samples, indent=4))
     
-    # scores = {
-    #     "context_precision": context_precision_scorer.score(),
-    #     "faithfulness": faithfulness_scorer.score(dataset)
-    # }
+    # Full cleanup after each strategy
+    print(f"[MEM] Full cleanup after '{strategy}' strategy...")
+    del samples
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+
     
-    # scores = evaluate(
-    #     dataset=dataset,
-    #     # metrics=metrics,
-    #     llm=judge_llm,
-    #     # embeddings=judge_embeddings
-    # )
-
-    # benchmark_results[strategy] = scores
-    # print("\nRESULTS:")
-    # print(scores)
-
-
-# ── Results table ─────────────────────────────────────────────────────────────
-# import pandas as pd
-
-# table = {
-#     strategy: {
-#         "Context Precision": benchmark_results[strategy]["context_precision"],
-#         "Answer Faithfulness": benchmark_results[strategy]["faithfulness"],
-#     }
-#     for strategy in text_splitter_strategies
-# }
-
-# df = pd.DataFrame(table)
-# with open("logs/rag_results.txt", "w") as f:
-#     f.write(df.to_string())
-# print(df)

@@ -52,3 +52,6 @@ htmlcov/
 # OS
 Thumbs.db
 .DS_Store
+.deepeval/*
+.deepeval/.deepeval-cache.json
+.deepeval/.latest_test_run.json

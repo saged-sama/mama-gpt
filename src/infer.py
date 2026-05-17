@@ -4,7 +4,7 @@ from tokenizers import Tokenizer, decoders
 import time
 
 MODEL_NAME = "mama-gpt-larger"
-MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest_sft.pt"
+MODEL_PATH = f"output/{MODEL_NAME}/checkpoint_{MODEL_NAME}_latest.pt"
 TOKENIZER_PATH = f"output/{MODEL_NAME}/tokenizer.json"
 
 VOCAB_SIZE = 32_000
@@ -37,8 +37,8 @@ def load_model():
     
     # If your checkpoint was the new 'dictionary' style, you'd use state_dict['model_state_dict']
     # But for your 5B token model, it's just the raw dict:
-    # model.load_state_dict(state_dict['model_state_dict'])
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict['model_state_dict'])
+    # model.load_state_dict(state_dict)
     
     
     model.to(DEVICE)
